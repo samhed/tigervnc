@@ -76,6 +76,8 @@
 
 #if !defined(WIN32) && !defined(__APPLE__)
 #include <X11/XKBlib.h>
+#include <X11/extensions/XInput2.h>
+#include <X11/extensions/XI2.h>
 extern const struct _code_map_xkb_to_qnum {
   const char * from;
   const unsigned short to;
@@ -160,6 +162,7 @@ Viewport::Viewport(int w, int h, const rfb::PixelFormat& serverPF, CConn* cc_)
 
   XkbFreeKeyboard(xkb, 0, True);
 #endif
+  toucheventsselected = false;
 
   Fl::add_clipboard_notify(handleClipboardChange, this);
 
@@ -230,6 +233,31 @@ void Viewport::updateWindow()
 
   r = frameBuffer->getDamage();
   damage(FL_DAMAGE_USER1, r.tl.x + x(), r.tl.y + y(), r.width(), r.height());
+
+  //--------------------
+  if (!this->toucheventsselected) {
+    XIEventMask eventmask;
+    unsigned char flags[3] = { 0, 0, 0 };
+    eventmask.deviceid = XIAllMasterDevices;
+    eventmask.mask_len = 3;
+    eventmask.mask = flags;
+    XISetMask(eventmask.mask, XI_ButtonPress);
+    XISetMask(eventmask.mask, XI_Motion);
+    XISetMask(eventmask.mask, XI_ButtonRelease);
+    XISetMask(eventmask.mask, XI_TouchBegin);
+    XISetMask(eventmask.mask, XI_TouchUpdate);
+    XISetMask(eventmask.mask, XI_TouchEnd);
+
+    XISelectEvents(fl_display, fl_xid(window()), &eventmask, 1);
+
+    int num_masks_selected;
+    XIGetSelectedEvents(fl_display, fl_xid(window()), &num_masks_selected);
+    if (num_masks_selected <= 0)
+      vlog.error("Couldn't select XI events");
+    else
+      this->toucheventsselected = true;
+  }
+  //--------------------
 }
 
 void Viewport::serverCutText(const char* str, rdr::U32 len)
@@ -547,7 +575,6 @@ int Viewport::handle(int event)
 {
   char *buffer;
   int ret;
-  int buttonMask, wheelMask;
   DownMap::const_iterator iter;
 
   switch (event) {
@@ -589,39 +616,6 @@ int Viewport::handle(int event)
     window()->cursor(FL_CURSOR_DEFAULT);
     // We want a last move event to help trigger edge stuff
     handlePointerEvent(Point(Fl::event_x() - x(), Fl::event_y() - y()), 0);
-    return 1;
-
-  case FL_PUSH:
-  case FL_RELEASE:
-  case FL_DRAG:
-  case FL_MOVE:
-  case FL_MOUSEWHEEL:
-    buttonMask = 0;
-    if (Fl::event_button1())
-      buttonMask |= 1;
-    if (Fl::event_button2())
-      buttonMask |= 2;
-    if (Fl::event_button3())
-      buttonMask |= 4;
-
-    if (event == FL_MOUSEWHEEL) {
-      wheelMask = 0;
-      if (Fl::event_dy() < 0)
-        wheelMask |= 8;
-      if (Fl::event_dy() > 0)
-        wheelMask |= 16;
-      if (Fl::event_dx() < 0)
-        wheelMask |= 32;
-      if (Fl::event_dx() > 0)
-        wheelMask |= 64;
-
-      // A quick press of the wheel "button", followed by a immediate
-      // release below
-      handlePointerEvent(Point(Fl::event_x() - x(), Fl::event_y() - y()),
-                         buttonMask | wheelMask);
-    } 
-
-    handlePointerEvent(Point(Fl::event_x() - x(), Fl::event_y() - y()), buttonMask);
     return 1;
 
   case FL_FOCUS:
@@ -1110,8 +1104,73 @@ int Viewport::handleSystemEvent(void *event, void *data)
   }
 #else
   XEvent *xevent = (XEvent*)event;
+  //-----------
+  XEvent ev = *xevent;
+  XGenericEventCookie *cookie = &ev.xcookie;
 
-  if (xevent->type == KeyPress) {
+  if (XGetEventData(fl_display, cookie)) {
+    XIDeviceEvent *devev = (XIDeviceEvent*)cookie->data;
+    int buttonMask;
+
+    switch(devev->evtype) {
+    case XI_ButtonPress:
+    case XI_Motion:
+    case XI_ButtonRelease:
+      /*vlog.error("XI event button%i source: %i (%ix%i)",
+        devev->detail, devev->sourceid, (int)devev->event_x, (int)devev->event_y);*/
+
+      buttonMask = devev->buttons.mask[0] >> 1;
+
+      if (devev->evtype == XI_ButtonPress) {
+        if (devev->detail == 1) // left mouse button
+          buttonMask |= 1;
+        if (devev->detail == 2) // middle mouse button
+          buttonMask |= 2;
+        if (devev->detail == 3) // right mouse button
+          buttonMask |= 4;
+        if (devev->detail == 4) // wheel up
+          buttonMask |= 8;
+        if (devev->detail == 5) // wheel down
+          buttonMask |= 16;
+        if (devev->detail == 6) // wheel left
+          buttonMask |= 32;
+        if (devev->detail == 7) // wheel right
+          buttonMask |= 64;
+      } else if (devev->evtype == XI_ButtonRelease) {
+        if (devev->detail == 1)
+          buttonMask &= ~1;
+        if (devev->detail == 2)
+          buttonMask &= ~2;
+        if (devev->detail == 3)
+          buttonMask &= ~4;
+        if (devev->detail == 4)
+          buttonMask &= ~8;
+        if (devev->detail == 5)
+          buttonMask &= ~16;
+        if (devev->detail == 6)
+          buttonMask &= ~32;
+        if (devev->detail == 7)
+          buttonMask &= ~64;
+      }
+
+      self->handlePointerEvent(rfb::Point(devev->event_x, devev->event_y), buttonMask);
+      break;
+    case XI_TouchBegin:
+      self->handlePointerEvent(rfb::Point(devev->event_x, devev->event_y), 1);
+      break;
+    case XI_TouchUpdate:
+      self->handlePointerEvent(rfb::Point(devev->event_x, devev->event_y), self->lastButtonMask);
+      break;
+    case XI_TouchEnd:
+      self->handlePointerEvent(rfb::Point(devev->event_x, devev->event_y), 0);
+      break;
+    default:
+      vlog.error("Other XI event");
+    }
+    return 1;
+  }
+  // ----------
+  else if (xevent->type == KeyPress) {
     int keycode;
     char str;
     KeySym keysym;

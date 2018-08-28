@@ -132,6 +132,12 @@ endif()
 # X11 stuff. It's in a if() so that we can say REQUIRED
 if(UNIX AND NOT APPLE)
   find_package(X11 REQUIRED)
+  find_library(LIBXINPUT_LIBRARY Xi)
+  if(LIBXINPUT_LIBRARY)
+    message(STATUS "Found XInput library")
+  else()
+    message(ERROR "Could not find XInput library")
+  endif()
 endif()
 
 # Check for zlib
