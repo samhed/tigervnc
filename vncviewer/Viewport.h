@@ -127,7 +127,7 @@ private:
   Fl_RGB_Image *cursor;
   rfb::Point cursorHotspot;
 
-  bool toucheventsselected;
+  int touchdeviceid;
 };
 
 #endif

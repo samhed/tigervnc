@@ -162,7 +162,7 @@ Viewport::Viewport(int w, int h, const rfb::PixelFormat& serverPF, CConn* cc_)
 
   XkbFreeKeyboard(xkb, 0, True);
 #endif
-  toucheventsselected = false;
+  touchdeviceid = -1;
 
   Fl::add_clipboard_notify(handleClipboardChange, this);
 
@@ -235,7 +235,36 @@ void Viewport::updateWindow()
   damage(FL_DAMAGE_USER1, r.tl.x + x(), r.tl.y + y(), r.width(), r.height());
 
   //--------------------
-  if (!this->toucheventsselected) {
+  if (this->touchdeviceid > 0)
+    return;
+
+  // Get the first touch device we find
+  int devicecnt;
+  XIDeviceInfo *deviceinfo = XIQueryDevice(fl_display, XIAllDevices, &devicecnt);
+  for (int i = 0; i < devicecnt; i ++) {
+    bool printed = false;
+    XIDeviceInfo *device = &deviceinfo[i];
+
+    for (int j = 0; j < device->num_classes; j ++) {
+      XITouchClassInfo *classinfo = (XITouchClassInfo*)(device->classes[j]);
+
+      if (classinfo->type != XITouchClass)
+        continue;
+
+      if (!printed) {
+        vlog.error("Device %d '%s'", device->deviceid, device->name);
+        printed = true;
+      }
+      vlog.error("\t%s touch \t%d touches",
+                 (classinfo->mode == XIDirectTouch) ? "DIRECT" : "DEPENDENT",
+                 classinfo->num_touches);
+      this->touchdeviceid = device->deviceid;
+    }
+  }
+  XIFreeDeviceInfo(deviceinfo);
+
+  if (this->touchdeviceid > 0) {
+    // Set the event mask
     XIEventMask eventmask;
     unsigned char flags[3] = { 0, 0, 0 };
     eventmask.deviceid = XIAllMasterDevices;
@@ -252,10 +281,14 @@ void Viewport::updateWindow()
 
     int num_masks_selected;
     XIGetSelectedEvents(fl_display, fl_xid(window()), &num_masks_selected);
-    if (num_masks_selected <= 0)
+    if (num_masks_selected <= 0) {
       vlog.error("Couldn't select XI events");
-    else
-      this->toucheventsselected = true;
+    } else {
+      vlog.error("SELECTED %i EVENTS", num_masks_selected);
+    }
+
+    /*if (XIGrabTouchBegin(fl_display, devid, fl_xid(window()), false, &eventmask, 0, NULL))
+      vlog.error("TOUCH GRAB FAIL");*/
   }
   //--------------------
 }
